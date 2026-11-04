@@ -1,0 +1,120 @@
+/**
+ * Batch job that escalates open Cases that have breached their SLA thresholds.
+ *
+ * SLA Rules:
+ *   - Medium priority open for > 48 hours  → escalated to High
+ *   - High priority open for   > 24 hours  → escalated to Critical
+ *
+ * On escalation:
+ *   - Priority is updated
+ *   - A chatter post is added to the Case
+ *   - An email alert is sent to the Case Owner
+ *
+ * Schedule this job via CaseEscalationScheduler or directly in Setup > Apex Jobs.
+ */
+global class CaseEscalationBatch implements Database.Batchable<SObject>, Database.Stateful {
+
+    private Integer escalatedCount = 0;
+    private List<String> errors = new List<String>();
+
+    global Database.QueryLocator start(Database.BatchableContext bc) {
+        return Database.getQueryLocator([
+            SELECT Id, CaseNumber, Subject, Priority, Status,
+                   CreatedDate, OwnerId, Owner.Email, Owner.Name,
+                   Account.Name
+            FROM   Case
+            WHERE  IsClosed = false
+              AND  Priority IN ('Medium', 'High')
+              AND  CreatedDate < :DateTime.now().addHours(-24)
+        ]);
+    }
+
+    global void execute(Database.BatchableContext bc, List<Case> cases) {
+        List<Case>           toUpdate    = new List<Case>();
+        List<Messaging.SingleEmailMessage> emails = new List<Messaging.SingleEmailMessage>();
+        List<FeedItem>       posts       = new List<FeedItem>();
+
+        for (Case c : cases) {
+            Long hoursOpen = (DateTime.now().getTime() - c.CreatedDate.getTime()) / 3600000;
+            String newPriority = getEscalatedPriority(c.Priority, hoursOpen);
+
+            if (newPriority == null) continue;
+
+            c.Priority = newPriority;
+            toUpdate.add(c);
+
+            posts.add(buildChatterPost(c, hoursOpen));
+
+            if (String.isNotBlank(c.Owner.Email)) {
+                emails.add(buildEmail(c, hoursOpen));
+            }
+        }
+
+        if (!toUpdate.isEmpty()) {
+            List<Database.SaveResult> results = Database.update(toUpdate, false);
+            for (Integer i = 0; i < results.size(); i++) {
+                if (results[i].isSuccess()) {
+                    escalatedCount++;
+                } else {
+                    errors.add('Case ' + toUpdate[i].CaseNumber + ': ' + results[i].getErrors()[0].getMessage());
+                }
+            }
+        }
+
+        if (!posts.isEmpty()) {
+            insert posts;
+        }
+
+        if (!emails.isEmpty()) {
+            Messaging.sendEmail(emails, false);
+        }
+    }
+
+    global void finish(Database.BatchableContext bc) {
+        String summary = 'CaseEscalationBatch completed.\n'
+            + 'Escalated: ' + escalatedCount + ' case(s).\n';
+
+        if (!errors.isEmpty()) {
+            summary += 'Errors (' + errors.size() + '):\n' + String.join(errors, '\n');
+        }
+
+        // Notify the running user
+        Messaging.SingleEmailMessage adminEmail = new Messaging.SingleEmailMessage();
+        adminEmail.setToAddresses(new List<String>{ UserInfo.getUserEmail() });
+        adminEmail.setSubject('Case Escalation Batch — Run Summary');
+        adminEmail.setPlainTextBody(summary);
+        Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{ adminEmail }, false);
+    }
+
+    // Returns the new priority if SLA is breached, null if no escalation needed
+    private String getEscalatedPriority(String currentPriority, Long hoursOpen) {
+        if (currentPriority == 'Medium' && hoursOpen >= 48) return 'High';
+        if (currentPriority == 'High'   && hoursOpen >= 24) return 'Critical';
+        return null;
+    }
+
+    private FeedItem buildChatterPost(Case c, Long hoursOpen) {
+        FeedItem post  = new FeedItem();
+        post.ParentId  = c.Id;
+        post.Body      = 'SLA BREACH — This case has been open for ' + hoursOpen
+                       + ' hour(s). Priority escalated to ' + c.Priority + '. Immediate attention required.';
+        return post;
+    }
+
+    private Messaging.SingleEmailMessage buildEmail(Case c, Long hoursOpen) {
+        Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();
+        email.setToAddresses(new List<String>{ c.Owner.Email });
+        email.setSubject('ACTION REQUIRED — SLA Breach on Case #' + c.CaseNumber);
+        email.setPlainTextBody(
+            'Hi ' + c.Owner.Name + ',\n\n'
+            + 'Case #' + c.CaseNumber + ' has breached its SLA.\n'
+            + 'Subject  : ' + c.Subject + '\n'
+            + 'Account  : ' + (c.Account != null ? c.Account.Name : 'N/A') + '\n'
+            + 'Open for : ' + hoursOpen + ' hour(s)\n'
+            + 'New Priority: ' + c.Priority + '\n\n'
+            + 'Please take immediate action.\n\n'
+            + 'This is an automated notification from the Case Escalation System.'
+        );
+        return email;
+    }
+}

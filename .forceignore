@@ -1,0 +1,2 @@
+# Ignore profiles and permission sets if you don't want to deploy them
+# profiles/

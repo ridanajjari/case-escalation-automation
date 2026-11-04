@@ -1,0 +1,8 @@
+.sfdx/
+.sf/
+node_modules/
+*.log
+.DS_Store
+
+# Personal study notes
+study.md
