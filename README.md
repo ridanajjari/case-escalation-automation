@@ -37,9 +37,9 @@ CaseEscalationBatch queries all open cases
 ## SLA Rules
 
 | Current Priority | Hours Open | New Priority |
-|-----------------|------------|-------------|
-| Medium           | > 48 hours | High        |
-| High             | > 24 hours | Critical    |
+| ---------------- | ---------- | ------------ |
+| Medium           | > 48 hours | High         |
+| High             | > 24 hours | Critical     |
 
 ---
 
@@ -60,6 +60,7 @@ force-app/main/default/classes/
 ## Deployment
 
 ### Prerequisites
+
 - Salesforce CLI (`sf`) installed
 - A Developer Edition or Sandbox org
 
@@ -101,15 +102,15 @@ Database.executeBatch(new CaseEscalationBatch(), 200);
 
 ## Test Coverage
 
-| Test Method | Scenario |
-|-------------|----------|
-| `testMediumCaseEscalatedAfter48Hours` | Medium case open 50h → escalated to High |
-| `testHighCaseEscalatedAfter24Hours` | High case open 26h → escalated to Critical |
-| `testMediumCaseNotEscalatedBefore48Hours` | Medium case open 30h → no change |
-| `testHighCaseNotEscalatedBefore24Hours` | High case open 10h → no change |
-| `testClosedCaseIsIgnored` | Closed cases are never touched |
-| `testSchedulerExecutes` | Scheduler runs without exception |
-| `testBulkEscalation` | 200 cases processed in one batch |
+| Test Method                               | Scenario                                   |
+| ----------------------------------------- | ------------------------------------------ |
+| `testMediumCaseEscalatedAfter48Hours`     | Medium case open 50h → escalated to High   |
+| `testHighCaseEscalatedAfter24Hours`       | High case open 26h → escalated to Critical |
+| `testMediumCaseNotEscalatedBefore48Hours` | Medium case open 30h → no change           |
+| `testHighCaseNotEscalatedBefore24Hours`   | High case open 10h → no change             |
+| `testClosedCaseIsIgnored`                 | Closed cases are never touched             |
+| `testSchedulerExecutes`                   | Scheduler runs without exception           |
+| `testBulkEscalation`                      | 200 cases processed in one batch           |
 
 ---
 
