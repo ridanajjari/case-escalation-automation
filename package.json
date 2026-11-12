@@ -5,8 +5,8 @@
   "description": "Scheduled Apex batch that escalates open Cases breaching SLA thresholds",
   "scripts": {
     "lint": "eslint --no-error-on-unmatched-pattern \"**/{aura,lwc}/**/*.js\"",
-    "prettier": "prettier --write \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
-    "prettier:verify": "prettier --check \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\""
+    "prettier": "prettier --write \"force-app/**/*.{cls,trigger,xml,js,html,css,json}\" README.md \"*.json\" \"config/**/*.json\" eslint.config.js",
+    "prettier:verify": "prettier --check \"force-app/**/*.{cls,trigger,xml,js,html,css,json}\" README.md \"*.json\" \"config/**/*.json\" eslint.config.js"
   },
   "devDependencies": {
     "@lwc/eslint-plugin-lwc": "^3.1.0",
