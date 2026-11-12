@@ -209,7 +209,7 @@ Status as of 2026-11-12:
   - `CaseEscalationBatch`: 88%
   - `CaseEscalationScheduler`: 100%
 
-  The uncovered lines are the duplicate-rule and invalid-threshold branches of rule loading, plus email-failure handling.
+  The 25 uncovered lines are error and guard branches the tests do not trigger: duplicate-rule and invalid-threshold handling in rule loading, email-limit and email-send failure handling, Chatter insert failures, two empty-list early returns, and the null branch of the threshold conversion.
 
 - ✅ Offline checks passing: `npm run prettier:verify` (also parses the Apex), `npm run lint`, and all `*-meta.xml` files are well-formed XML.
 - Not exercised end to end: the shipped `High_To_Critical` rule. The test org has no `Critical` priority, and the tests use injected rules with standard priorities only.
