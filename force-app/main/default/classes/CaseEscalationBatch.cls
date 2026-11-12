@@ -11,12 +11,18 @@
  *   - An email alert is sent to the Case Owner
  *
  * Schedule this job via CaseEscalationScheduler or directly in Setup > Apex Jobs.
+ *
+ * Sharing: declared `without sharing` on purpose. This is an org-wide SLA job:
+ * it must evaluate every open Case regardless of which user scheduled it,
+ * otherwise Cases the scheduling user cannot see would silently never escalate.
+ * It only reads/updates Case.Priority and posts to the Case feed; it exposes no
+ * data back to an interactive user.
  */
-global class CaseEscalationBatch implements Database.Batchable<SObject>, Database.Stateful {
+public without sharing class CaseEscalationBatch implements Database.Batchable<SObject>, Database.Stateful {
   private Integer escalatedCount = 0;
   private List<String> errors = new List<String>();
 
-  global Database.QueryLocator start(Database.BatchableContext bc) {
+  public Database.QueryLocator start(Database.BatchableContext bc) {
     return Database.getQueryLocator(
       [
         SELECT
@@ -39,7 +45,7 @@ global class CaseEscalationBatch implements Database.Batchable<SObject>, Databas
     );
   }
 
-  global void execute(Database.BatchableContext bc, List<Case> cases) {
+  public void execute(Database.BatchableContext bc, List<Case> cases) {
     List<Case> toUpdate = new List<Case>();
     List<Messaging.SingleEmailMessage> emails = new List<Messaging.SingleEmailMessage>();
     List<FeedItem> posts = new List<FeedItem>();
@@ -87,7 +93,7 @@ global class CaseEscalationBatch implements Database.Batchable<SObject>, Databas
     }
   }
 
-  global void finish(Database.BatchableContext bc) {
+  public void finish(Database.BatchableContext bc) {
     String summary =
       'CaseEscalationBatch completed.\n' +
       'Escalated: ' +
