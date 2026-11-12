@@ -67,7 +67,7 @@ force-app/main/default/classes/
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/case-escalation-automation.git
+git clone https://github.com/ridanajjari/case-escalation-automation.git
 cd case-escalation-automation
 
 # 2. Authenticate to your org
