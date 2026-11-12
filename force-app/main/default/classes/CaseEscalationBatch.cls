@@ -30,8 +30,8 @@
  * Sharing: declared `without sharing` on purpose. This is an org-wide SLA job:
  * it must evaluate every open Case regardless of which user scheduled it,
  * otherwise Cases the scheduling user cannot see would silently never escalate.
- * It only reads/updates Case.Priority and posts to the Case feed; it exposes no
- * data back to an interactive user.
+ * It only updates Case.Priority and Case.Last_Escalated_At__c and posts to the
+ * Case feed; it exposes no data back to an interactive user.
  */
 public without sharing class CaseEscalationBatch implements Database.Batchable<SObject>, Database.Stateful {
   private static final Long MILLIS_PER_HOUR = 3600000;
