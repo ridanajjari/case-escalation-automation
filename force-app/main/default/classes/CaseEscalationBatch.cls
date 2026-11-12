@@ -36,6 +36,15 @@
 public without sharing class CaseEscalationBatch implements Database.Batchable<SObject>, Database.Stateful {
   private static final Long MILLIS_PER_HOUR = 3600000;
 
+  private static final String CASE_QUERY =
+    'SELECT Id, CaseNumber, Subject, Priority, Status, CreatedDate, ' +
+    'Last_Escalated_At__c, OwnerId, Account.Name ' +
+    'FROM Case ' +
+    'WHERE IsClosed = false ' +
+    'AND Priority IN :fromPriorities ' +
+    'AND (Last_Escalated_At__c < :cutoff ' +
+    'OR (Last_Escalated_At__c = null AND CreatedDate < :cutoff))';
+
   // Test-only injection point so tests do not depend on the shipped CMDT rows.
   @TestVisible
   private static List<EscalationRule> rulesOverride;
@@ -101,29 +110,19 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
     // per-priority threshold is applied in execute(). SOQL cannot express
     // COALESCE(Last_Escalated_At__c, CreatedDate), hence the OR. With no
     // valid rules the priority set is empty and the query returns no rows.
-    Set<String> fromPriorities = rulesByFromPriority.keySet();
     DateTime cutoff = DateTime.now()
       .addHours(-(minThresholdHours == null ? 0 : minThresholdHours));
-    return Database.getQueryLocator(
-      [
-        SELECT
-          Id,
-          CaseNumber,
-          Subject,
-          Priority,
-          Status,
-          CreatedDate,
-          Last_Escalated_At__c,
-          OwnerId,
-          Account.Name
-        FROM Case
-        WHERE
-          IsClosed = FALSE
-          AND Priority IN :fromPriorities
-          AND (Last_Escalated_At__c < :cutoff
-          OR (Last_Escalated_At__c = NULL
-          AND CreatedDate < :cutoff))
-      ]
+    Map<String, Object> binds = new Map<String, Object>{
+      'fromPriorities' => rulesByFromPriority.keySet(),
+      'cutoff' => cutoff
+    };
+    // SYSTEM_MODE: this is an org-wide system job (see the sharing note
+    // above), so it must not depend on the scheduling user's field-level
+    // security on Last_Escalated_At__c.
+    return Database.getQueryLocatorWithBinds(
+      CASE_QUERY,
+      binds,
+      AccessLevel.SYSTEM_MODE
     );
   }
 
@@ -150,7 +149,11 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
     }
 
     List<Case> escalated = new List<Case>();
-    List<Database.SaveResult> results = Database.update(toUpdate, false);
+    List<Database.SaveResult> results = Database.update(
+      toUpdate,
+      false,
+      AccessLevel.SYSTEM_MODE
+    );
     for (Integer i = 0; i < results.size(); i++) {
       if (results[i].isSuccess()) {
         escalatedCount++;
@@ -242,7 +245,11 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
     if (posts.isEmpty()) {
       return;
     }
-    List<Database.SaveResult> results = Database.insert(posts, false);
+    List<Database.SaveResult> results = Database.insert(
+      posts,
+      false,
+      AccessLevel.SYSTEM_MODE
+    );
     for (Integer i = 0; i < results.size(); i++) {
       if (!results[i].isSuccess()) {
         errors.add(
