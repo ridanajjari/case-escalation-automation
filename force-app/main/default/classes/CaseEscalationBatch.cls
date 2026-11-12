@@ -1,10 +1,15 @@
 /**
  * Batch job that escalates open Cases that have breached their SLA thresholds.
  *
- * SLA Rules (age = hours since Last_Escalated_At__c, or since CreatedDate
- * if the case has never been escalated):
+ * SLA rules come from the Case_Escalation_Rule__mdt Custom Metadata Type
+ * (active rows only). Age = hours since Last_Escalated_At__c, or since
+ * CreatedDate if the case has never been escalated. Shipped rules:
  *   - Medium priority, age >= 48 hours → escalated to High
  *   - High priority,   age >= 24 hours → escalated to Critical
+ *
+ * A rule whose To_Priority__c is not an active Case.Priority value (e.g.
+ * "Critical" in an org that has not added it) is skipped and reported in the
+ * run summary instead of failing every update.
  *
  * Measuring from the last escalation means a Medium case escalated to High
  * gets a fresh 24 hours at High instead of jumping straight to Critical on
@@ -24,14 +29,71 @@
  * data back to an interactive user.
  */
 public without sharing class CaseEscalationBatch implements Database.Batchable<SObject>, Database.Stateful {
+  private static final Long MILLIS_PER_HOUR = 3600000;
+
+  // Test-only injection point so tests do not depend on the shipped CMDT rows.
+  @TestVisible
+  private static List<EscalationRule> rulesOverride;
+
+  private Map<String, EscalationRule> rulesByFromPriority = new Map<String, EscalationRule>();
+  private Integer minThresholdHours;
   private Integer escalatedCount = 0;
+  @TestVisible
   private List<String> errors = new List<String>();
 
+  public CaseEscalationBatch() {
+    Set<String> validPriorities = new Set<String>();
+    for (
+      Schema.PicklistEntry entry : Schema.SObjectType.Case.fields.Priority.getPicklistValues()
+    ) {
+      if (entry.isActive()) {
+        validPriorities.add(entry.getValue());
+      }
+    }
+
+    for (EscalationRule rule : loadRules()) {
+      if (!validPriorities.contains(rule.toPriority)) {
+        errors.add(
+          'Rule skipped: target priority "' +
+            rule.toPriority +
+            '" is not an active Case.Priority value.'
+        );
+        continue;
+      }
+      if (rule.thresholdHours == null || rule.thresholdHours < 1) {
+        errors.add(
+          'Rule skipped: invalid threshold for priority "' +
+            rule.fromPriority +
+            '".'
+        );
+        continue;
+      }
+      if (rulesByFromPriority.containsKey(rule.fromPriority)) {
+        errors.add(
+          'Rule skipped: more than one active rule for priority "' +
+            rule.fromPriority +
+            '".'
+        );
+        continue;
+      }
+      rulesByFromPriority.put(rule.fromPriority, rule);
+      if (
+        minThresholdHours == null ||
+        rule.thresholdHours < minThresholdHours
+      ) {
+        minThresholdHours = rule.thresholdHours;
+      }
+    }
+  }
+
   public Database.QueryLocator start(Database.BatchableContext bc) {
-    // Coarse SOQL pre-filter on the smallest threshold (24h); the exact
+    // Coarse SOQL pre-filter on the smallest active threshold; the exact
     // per-priority threshold is applied in execute(). SOQL cannot express
-    // COALESCE(Last_Escalated_At__c, CreatedDate), hence the OR.
-    DateTime cutoff = DateTime.now().addHours(-24);
+    // COALESCE(Last_Escalated_At__c, CreatedDate), hence the OR. With no
+    // valid rules the priority set is empty and the query returns no rows.
+    Set<String> fromPriorities = rulesByFromPriority.keySet();
+    DateTime cutoff = DateTime.now()
+      .addHours(-(minThresholdHours == null ? 0 : minThresholdHours));
     return Database.getQueryLocator(
       [
         SELECT
@@ -49,7 +111,7 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
         FROM Case
         WHERE
           IsClosed = FALSE
-          AND Priority IN ('Medium', 'High')
+          AND Priority IN :fromPriorities
           AND (Last_Escalated_At__c < :cutoff
           OR (Last_Escalated_At__c = NULL
           AND CreatedDate < :cutoff))
@@ -139,16 +201,58 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
     DateTime reference = c.Last_Escalated_At__c != null
       ? c.Last_Escalated_At__c
       : c.CreatedDate;
-    return (now.getTime() - reference.getTime()) / 3600000;
+    return (now.getTime() - reference.getTime()) / MILLIS_PER_HOUR;
   }
 
   // Returns the new priority if SLA is breached, null if no escalation needed
   private String getEscalatedPriority(String currentPriority, Long hoursOpen) {
-    if (currentPriority == 'Medium' && hoursOpen >= 48)
-      return 'High';
-    if (currentPriority == 'High' && hoursOpen >= 24)
-      return 'Critical';
+    EscalationRule rule = rulesByFromPriority.get(currentPriority);
+    if (rule != null && hoursOpen >= rule.thresholdHours) {
+      return rule.toPriority;
+    }
     return null;
+  }
+
+  private static List<EscalationRule> loadRules() {
+    if (rulesOverride != null) {
+      return rulesOverride;
+    }
+    List<EscalationRule> rules = new List<EscalationRule>();
+    for (
+      Case_Escalation_Rule__mdt row : Case_Escalation_Rule__mdt.getAll()
+        .values()
+    ) {
+      if (row.Is_Active__c) {
+        rules.add(
+          new EscalationRule(
+            row.From_Priority__c,
+            row.To_Priority__c,
+            row.Threshold_Hours__c == null
+              ? null
+              : row.Threshold_Hours__c.intValue()
+          )
+        );
+      }
+    }
+    return rules;
+  }
+
+  // In-memory form of a Case_Escalation_Rule__mdt row.
+  @TestVisible
+  private class EscalationRule {
+    public String fromPriority;
+    public String toPriority;
+    public Integer thresholdHours;
+
+    public EscalationRule(
+      String fromPriority,
+      String toPriority,
+      Integer thresholdHours
+    ) {
+      this.fromPriority = fromPriority;
+      this.toPriority = toPriority;
+      this.thresholdHours = thresholdHours;
+    }
   }
 
   private FeedItem buildChatterPost(Case c, Long hoursOpen) {

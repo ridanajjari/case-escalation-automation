@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description
+  >One row per SLA escalation step used by CaseEscalationBatch: cases at From Priority whose age (hours since last escalation, or since creation) reaches Threshold Hours move to To Priority.</description>
+    <label>Case Escalation Rule</label>
+    <pluralLabel>Case Escalation Rules</pluralLabel>
+    <visibility>Public</visibility>
+</CustomObject>
