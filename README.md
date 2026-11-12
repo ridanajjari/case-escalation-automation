@@ -1,16 +1,16 @@
-# Case Escalation Automation — Salesforce
+# Case Escalation Automation (Salesforce)
 
-A scheduled Apex batch that raises the priority of open cases that have breached an SLA threshold, posts a Chatter alert on the case and emails the case owner.
-
----
-
-## Business Problem
-
-Support teams miss SLAs when cases sit open too long without being noticed. Managers have no visibility until a customer complains. This job runs on a schedule and escalates cases that have waited too long at their current priority.
+A scheduled Apex batch that raises the priority of open cases that have been waiting longer than an SLA threshold. For each escalated case it posts a Chatter alert on the record and emails the case owner.
 
 ---
 
-## How It Works
+## Why I built it
+
+Support teams miss SLAs when cases sit open too long and nobody notices. Managers usually find out when a customer complains. This job runs on a schedule and escalates cases that have waited too long at their current priority.
+
+---
+
+## How it works
 
 ```
 Every hour (scheduled)
@@ -32,63 +32,65 @@ and queries open cases at a "From" priority
         │    (Database.update with allOrNone = false)     │
         │ 2. For rows that saved successfully only:       │
         │    - post a Chatter alert on the case           │
-        │    - email the owner if it is an active User    │
+        │    - email the case owner (active User only)    │
         │ 3. Email a run summary (counts + errors) to the │
         │    user the job runs as                         │
         └────────────────────────────────────────────────┘
 ```
 
-Because age is measured from the last escalation, a Medium case escalated to High gets a fresh 24 hours at High. It is not escalated again to Critical on the next hourly run.
+I measure age from the last escalation, so a Medium case escalated to High gets a fresh 24 hours at High. It does not jump to Critical on the next hourly run.
 
 ---
 
-## SLA Rules (Custom Metadata)
+## SLA rules (Custom Metadata)
 
-Rules live in the `Case_Escalation_Rule__mdt` Custom Metadata Type, so thresholds and mappings can be changed in Setup without a code change.
+The rules live in the `Case_Escalation_Rule__mdt` Custom Metadata Type, so an admin can change thresholds and mappings in Setup without touching code.
 
 | Record             | From Priority | Threshold Hours | To Priority | Active |
 | ------------------ | ------------- | --------------- | ----------- | ------ |
-| `Medium_To_High`   | Medium        | 48              | High        | ✔      |
-| `High_To_Critical` | High          | 24              | Critical    | ✔      |
+| `Medium_To_High`   | Medium        | 48              | High        | Yes    |
+| `High_To_Critical` | High          | 24              | Critical    | Yes    |
 
-When the batch starts, it skips (and lists in the run summary) any active rule that:
+When the batch starts, it skips any active rule that:
 
 - targets a value that is not an active `Case.Priority` picklist value,
 - has a missing or zero threshold, or
 - duplicates another active rule's From Priority.
 
+Skipped rules are listed in the run summary.
+
 ### Prerequisite: the `Critical` priority
 
-`Critical` is **not** a standard Case priority (the defaults are High, Medium and Low). Add it before relying on the `High_To_Critical` rule:
+`Critical` is **not** a standard Case priority (the defaults are High, Medium and Low). Add it before you rely on the `High_To_Critical` rule:
 
 Setup → Object Manager → Case → Fields & Relationships → Priority → Values → **New** → `Critical`.
 
-Without it, the batch skips the `High_To_Critical` rule and reports it in the run summary. It does not fail every High-priority update. This repo intentionally does **not** ship `StandardValueSet` metadata for `CasePriority`: deploying that file replaces the org's whole priority value set, which is risky in an org that already customised it.
+Without it, the batch skips the `High_To_Critical` rule and reports it in the run summary. It does not fail every High-priority update. I deliberately do **not** ship `StandardValueSet` metadata for `CasePriority`: deploying that file replaces the org's whole priority value set, which is risky in an org that has already customised it.
 
 ---
 
 ## Notifications
 
-- **Chatter**: one post per successfully escalated case. Posts are inserted with `allOrNone = false`, and failures are listed in the run summary.
-- **Owner email**: sent with `setTargetObjectId(ownerId)` and `setSaveAsActivity(false)`. It is sent only when the owner is an active User.
-  - Queue-owned cases (owner Id prefix `00G`) get no email; the Chatter post on the record is their notification.
-  - A blank Subject is shown as `(no subject)`.
-- **Email failures never fail the batch**: the batch checks the per-transaction email invocation limit first and catches send errors (for example, deliverability set to "System email only"). Both cases are recorded in the run summary, which is also written to the debug log.
+- **Chatter**: one post per case that was escalated successfully. Posts are inserted with `allOrNone = false`, and failures go in the run summary.
+- **Owner email**: sent with `setTargetObjectId(ownerId)` and `setSaveAsActivity(false)`, and only when the case owner is an active User.
+  - Queue-owned cases (owner Id prefix `00G`) get no email. The Chatter post on the record is their notification.
+  - A blank Subject shows as `(no subject)`.
+- **Email failures never fail the batch**: I check the per-transaction email invocation limit first and catch send errors (for example when deliverability is set to "System email only"). Both cases are recorded in the run summary, which is also written to the debug log.
 
 ---
 
-## Design Notes and Known Limits
+## Design notes and known limits
 
-- **Sharing**: `CaseEscalationBatch` is `without sharing` on purpose. An org-wide SLA job must see every open case, whoever scheduled it. `CaseEscalationScheduler` is `with sharing`: it only enqueues the batch.
+- **Sharing**: `CaseEscalationBatch` is `without sharing` on purpose. An org-wide SLA job has to see every open case, whoever scheduled it. `CaseEscalationScheduler` is `with sharing` because it only enqueues the batch.
 - **System mode**: the batch query and its Case/FeedItem DML run with `AccessLevel.SYSTEM_MODE`, so the job does not depend on the scheduling user's field-level security on `Last_Escalated_At__c`. The permission set gives admins read access to the field.
 - **Query selectivity**: SOQL cannot express `COALESCE(Last_Escalated_At__c, CreatedDate)`, so `start()` pre-filters with:
   - `IsClosed = false`
   - `Priority IN (active From priorities)`
   - `(Last_Escalated_At__c < cutoff OR (Last_Escalated_At__c = null AND CreatedDate < cutoff))`, where the cutoff is the smallest threshold.
 
-  The exact per-rule threshold is then checked in Apex. Because of the `OR` across a non-indexed custom field, this query is not selective. A batch `QueryLocator` handles that, but on a very large Case table it is a full scan. A custom index on `Last_Escalated_At__c` would be the next step.
+  Then I check the exact per-rule threshold in Apex. Because of the `OR` on a non-indexed custom field, this query is not selective. A batch `QueryLocator` copes with that, but on a very large Case table it is a full scan. My next step would be a custom index on `Last_Escalated_At__c`.
 
-- **Calendar hours**, not business hours.
+- It counts **calendar hours**, not business hours.
 - A **manual priority change** does not reset `Last_Escalated_At__c`.
 
 ---
@@ -97,11 +99,11 @@ Without it, the batch skips the `High_To_Critical` rule and reports it in the ru
 
 - **Standard Case Escalation Rules** can reassign a case and notify people after a time-based age threshold. Their escalation actions **cannot update fields** such as Priority, and only one escalation rule can be active at a time.
 - **Entitlement Management (Entitlement Processes + Milestones)** is the platform's full SLA model: business hours, milestone timers, and success/warning/violation actions, including field updates. For a real support org with contractual SLAs, it is what I would evaluate first. It needs entitlements set up per account or contact, plus process configuration and licensing.
-- **This project** keeps the escalation chain in a small, testable Apex batch driven by Custom Metadata. It exists to demonstrate batch/schedulable Apex, partial-success DML and notification handling, not to replace Entitlements.
+- **This project** keeps the escalation chain in a small, testable Apex batch driven by Custom Metadata. I built it to show batch/schedulable Apex, partial-success DML and notification handling, not to replace Entitlements.
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
 force-app/main/default/
@@ -119,7 +121,7 @@ force-app/main/default/
 
 ---
 
-## Deployment
+## Setup
 
 ### Prerequisites
 
@@ -149,7 +151,7 @@ sf apex run test --target-org my-org --class-names CaseEscalationBatchTest --cod
 
 Optional: add the `Critical` priority value (see the prerequisite above).
 
-### Schedule the batch (run in Anonymous Apex)
+### Schedule the batch (Anonymous Apex)
 
 ```apex
 // Runs every hour at the top of the hour
@@ -160,7 +162,7 @@ System.schedule(
 );
 ```
 
-### Or run immediately
+### Or run it once now
 
 ```apex
 Database.executeBatch(new CaseEscalationBatch(), 200);
@@ -176,47 +178,43 @@ npm run prettier:verify
 
 ---
 
-## Test Methods
+## Test methods
 
-The tests inject their own rules through a `@TestVisible` override and use only standard priorities (Low → Medium at 24h, Medium → High at 48h). They do not depend on the shipped metadata records or on `Critical` existing in the org.
+The tests inject their own rules through a `@TestVisible` override and only use standard priorities (Low → Medium at 24h, Medium → High at 48h). They do not depend on the shipped metadata records or on `Critical` existing in the org.
 
-| Test Method                                                | Scenario                                                                             |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `testMediumCaseEscalatedAfter48Hours`                      | Medium case open 50h → High, `Last_Escalated_At__c` stamped                          |
-| `testLowCaseEscalatedAfter24Hours`                         | Low case open 26h → Medium                                                           |
-| `testMediumCaseNotEscalatedBefore48Hours`                  | Medium case open 30h → no change                                                     |
-| `testLowCaseNotEscalatedBefore24Hours`                     | Low case open 10h → no change                                                        |
-| `testClosedCaseIsIgnored`                                  | Closed cases are never touched                                                       |
-| `testRecentlyEscalatedCaseIsNotEscalatedAgain`             | Old case escalated 2h ago → no change                                                |
-| `testNoDoubleEscalationAcrossConsecutiveRuns`              | Two consecutive runs → escalated one level only                                      |
-| `testEscalatesAgainOnceThresholdPassedSinceLastEscalation` | Threshold passed since last escalation → escalated                                   |
-| `testRuleWithInvalidTargetPriorityIsSkipped`               | Rule targeting a non-existent priority → case untouched, error reported              |
-| `testChatterPostCreatedOnEscalation`                       | Chatter post only on the escalated case, naming the new priority                     |
-| `testPartialFailureNotifiesOnlySuccessfulRows`             | One row fails to update → other rows escalated; no post or email for the failed row  |
-| `testOwnerEmailTargetsUserAndHandlesNullSubject`           | Email targets the owner User Id, `saveAsActivity = false`, blank Subject placeholder |
-| `testQueueOwnedCaseGetsChatterPostButNoEmail`              | Queue-owned case → escalated + Chatter post, no email                                |
-| `testSchedulerIsScheduledHourly`                           | `CronTrigger` has the expected cron expression and job name                          |
-| `testBulkEscalation`                                       | 200 cases processed in one batch                                                     |
+| Test Method                                                | Scenario                                                                                    |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `testMediumCaseEscalatedAfter48Hours`                      | Medium case open 50h → High, `Last_Escalated_At__c` stamped                                 |
+| `testLowCaseEscalatedAfter24Hours`                         | Low case open 26h → Medium                                                                  |
+| `testMediumCaseNotEscalatedBefore48Hours`                  | Medium case open 30h → no change                                                            |
+| `testLowCaseNotEscalatedBefore24Hours`                     | Low case open 10h → no change                                                               |
+| `testClosedCaseIsIgnored`                                  | Closed cases are never touched                                                              |
+| `testRecentlyEscalatedCaseIsNotEscalatedAgain`             | Old case escalated 2h ago → no change                                                       |
+| `testNoDoubleEscalationAcrossConsecutiveRuns`              | Two consecutive runs → escalated one level only                                             |
+| `testEscalatesAgainOnceThresholdPassedSinceLastEscalation` | Threshold passed since last escalation → escalated                                          |
+| `testRuleWithInvalidTargetPriorityIsSkipped`               | Rule targeting a non-existent priority → case untouched, error reported                     |
+| `testChatterPostCreatedOnEscalation`                       | Chatter post only on the escalated case, naming the new priority                            |
+| `testPartialFailureNotifiesOnlySuccessfulRows`             | One row fails to update → other rows escalated; no post or email for the failed row         |
+| `testOwnerEmailTargetsUserAndHandlesNullSubject`           | Email targets the case owner's User Id, `saveAsActivity = false`, blank Subject placeholder |
+| `testQueueOwnedCaseGetsChatterPostButNoEmail`              | Queue-owned case → escalated + Chatter post, no email                                       |
+| `testSchedulerIsScheduledHourly`                           | `CronTrigger` has the expected cron expression and job name                                 |
+| `testBulkEscalation`                                       | 200 cases processed in one batch                                                            |
 
 ---
 
 ## Testing
 
-Status as of 2026-11-12:
+I deployed and tested this on 12 Nov 2026 in a Developer Edition org (API 68.0).
 
-- ✅ Deployed to a Developer Edition org at API 68.0 (2026-11-12): all classes, the `Last_Escalated_At__c` field, the Custom Metadata Type with its 2 records, and the permission set.
-- ✅ 15/15 Apex tests passing (`CaseEscalationBatchTest`). Coverage as reported by `sf apex run test --code-coverage`:
-  - `CaseEscalationBatch`: 88%
-  - `CaseEscalationScheduler`: 100%
-
-  The 25 uncovered lines are error and guard branches the tests do not trigger: duplicate-rule and invalid-threshold handling in rule loading, email-limit and email-send failure handling, Chatter insert failures, two empty-list early returns, and the null branch of the threshold conversion.
-
-- ✅ Offline checks passing: `npm run prettier:verify` (also parses the Apex), `npm run lint`, and all `*-meta.xml` files are well-formed XML.
-- Not exercised end to end: the shipped `High_To_Critical` rule. The test org has no `Critical` priority, and the tests use injected rules with standard priorities only.
+- Deployed: all classes, the `Last_Escalated_At__c` field, the Custom Metadata Type with its 2 records, and the permission set.
+- 15 of 15 Apex tests pass (`CaseEscalationBatchTest`). Coverage reported by `sf apex run test --code-coverage`: `CaseEscalationBatch` 88%, `CaseEscalationScheduler` 100%.
+- The 25 uncovered lines are error and guard branches the tests don't trigger: duplicate-rule and invalid-threshold handling in rule loading, email-limit and email-send failure handling, Chatter insert failures, two empty-list early returns, and the null branch of the threshold conversion.
+- Offline checks pass: `npm run prettier:verify` (which also parses the Apex), `npm run lint`, and every `*-meta.xml` file is well-formed XML.
+- What I have not tested end to end: the shipped `High_To_Critical` rule. My test org has no `Critical` priority, and the tests only use injected rules with standard priorities.
 
 ---
 
-## Key Salesforce Concepts Demonstrated
+## Salesforce concepts used
 
 - `Database.Batchable` + `Database.Stateful` for large data volume processing
 - `Schedulable` interface for recurring execution
@@ -229,7 +227,7 @@ Status as of 2026-11-12:
 
 ## Author
 
-**Rida Najjari** — Salesforce Consultant, Developer & Administrator
+**Rida Najjari**, Salesforce Consultant, Developer & Administrator
 
 4x Salesforce Certified: Platform Administrator · Platform App Builder · Platform Developer I · Associate
 
