@@ -17,8 +17,13 @@
  *
  * On escalation:
  *   - Priority is updated and Last_Escalated_At__c is stamped
- *   - A chatter post is added to the Case
- *   - An email alert is sent to the Case Owner
+ *   - A Chatter post is added to the Case (also for queue-owned Cases)
+ *   - If the owner is an active User, an email is sent to them via
+ *     setTargetObjectId (no Activity is logged). Queue-owned Cases get no
+ *     email: the Chatter post on the record is their notification.
+ *   Notifications are only built for rows whose update succeeded. Email
+ *   failures (limits, deliverability turned off) are caught and reported in
+ *   the run summary; they never fail the batch.
  *
  * Schedule this job via CaseEscalationScheduler or directly in Setup > Apex Jobs.
  *
@@ -40,6 +45,11 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
   private Integer escalatedCount = 0;
   @TestVisible
   private List<String> errors = new List<String>();
+  // Owner emails handed to Messaging.sendEmail in this transaction, kept so
+  // tests can assert on them without depending on the org's email
+  // deliverability setting. Static (not serialized with the Stateful batch).
+  @TestVisible
+  private static List<Messaging.SingleEmailMessage> ownerEmails = new List<Messaging.SingleEmailMessage>();
 
   public CaseEscalationBatch() {
     Set<String> validPriorities = new Set<String>();
@@ -105,8 +115,6 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
           CreatedDate,
           Last_Escalated_At__c,
           OwnerId,
-          Owner.Email,
-          Owner.Name,
           Account.Name
         FROM Case
         WHERE
@@ -160,15 +168,66 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
     // Notifications are built only for rows whose update succeeded, so a
     // failed escalation never produces a Chatter post or an email.
     postToChatter(escalated, hoursByCaseId);
+    emailOwners(escalated, hoursByCaseId);
+  }
+
+  private void emailOwners(List<Case> escalated, Map<Id, Long> hoursByCaseId) {
+    // Queue owners (Group, Id prefix 00G) are skipped on purpose.
+    Set<Id> userOwnerIds = new Set<Id>();
+    for (Case c : escalated) {
+      if (c.OwnerId.getSObjectType() == User.SObjectType) {
+        userOwnerIds.add(c.OwnerId);
+      }
+    }
+    if (userOwnerIds.isEmpty()) {
+      return;
+    }
+
+    // setTargetObjectId fails for inactive users, so only email active ones.
+    Map<Id, User> activeOwners = new Map<Id, User>(
+      [SELECT Id, Name FROM User WHERE Id IN :userOwnerIds AND IsActive = TRUE]
+    );
 
     List<Messaging.SingleEmailMessage> emails = new List<Messaging.SingleEmailMessage>();
     for (Case c : escalated) {
-      if (String.isNotBlank(c.Owner.Email)) {
-        emails.add(buildEmail(c, hoursByCaseId.get(c.Id)));
+      User owner = activeOwners.get(c.OwnerId);
+      if (owner != null) {
+        emails.add(buildEmail(c, owner, hoursByCaseId.get(c.Id)));
       }
     }
-    if (!emails.isEmpty()) {
-      Messaging.sendEmail(emails, false);
+    ownerEmails.addAll(emails);
+    sendSafely(emails, 'Owner notification');
+  }
+
+  // Sends without ever throwing: limit or deliverability problems are
+  // recorded in the run summary instead of failing the batch chunk.
+  private void sendSafely(
+    List<Messaging.SingleEmailMessage> emails,
+    String purpose
+  ) {
+    if (emails.isEmpty()) {
+      return;
+    }
+    if (Limits.getEmailInvocations() >= Limits.getLimitEmailInvocations()) {
+      errors.add(
+        purpose + ' email skipped: per-transaction email limit reached.'
+      );
+      return;
+    }
+    try {
+      List<Messaging.SendEmailResult> results = Messaging.sendEmail(
+        emails,
+        false
+      );
+      for (Messaging.SendEmailResult result : results) {
+        if (!result.isSuccess()) {
+          errors.add(
+            purpose + ' email failed: ' + result.getErrors()[0].getMessage()
+          );
+        }
+      }
+    } catch (Exception e) {
+      errors.add(purpose + ' email not sent: ' + e.getMessage());
     }
   }
 
@@ -211,14 +270,18 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
         String.join(errors, '\n');
     }
 
-    // Notify the running user
+    // Always visible in the debug log, even if the summary email fails.
+    System.debug(LoggingLevel.INFO, summary);
+
+    // Notify the user the batch runs as (the user who scheduled it)
     Messaging.SingleEmailMessage adminEmail = new Messaging.SingleEmailMessage();
-    adminEmail.setToAddresses(new List<String>{ UserInfo.getUserEmail() });
+    adminEmail.setTargetObjectId(UserInfo.getUserId());
+    adminEmail.setSaveAsActivity(false);
     adminEmail.setSubject('Case Escalation Batch — Run Summary');
     adminEmail.setPlainTextBody(summary);
-    Messaging.sendEmail(
+    sendSafely(
       new List<Messaging.SingleEmailMessage>{ adminEmail },
-      false
+      'Run summary'
     );
   }
 
@@ -295,26 +358,37 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
     return post;
   }
 
-  private Messaging.SingleEmailMessage buildEmail(Case c, Long hoursOpen) {
+  @TestVisible
+  private static final String NO_SUBJECT = '(no subject)';
+
+  private Messaging.SingleEmailMessage buildEmail(
+    Case c,
+    User owner,
+    Long hoursOpen
+  ) {
     Messaging.SingleEmailMessage email = new Messaging.SingleEmailMessage();
-    email.setToAddresses(new List<String>{ c.Owner.Email });
+    // Emails sent to internal Users via setTargetObjectId do not count
+    // against the org's daily single-email limit. saveAsActivity must be
+    // false when the target is a User.
+    email.setTargetObjectId(owner.Id);
+    email.setSaveAsActivity(false);
     email.setSubject('ACTION REQUIRED — SLA Breach on Case #' + c.CaseNumber);
     email.setPlainTextBody(
       'Hi ' +
-        c.Owner.Name +
+        owner.Name +
         ',\n\n' +
         'Case #' +
         c.CaseNumber +
         ' has breached its SLA.\n' +
         'Subject  : ' +
-        c.Subject +
+        (String.isBlank(c.Subject) ? NO_SUBJECT : c.Subject) +
         '\n' +
         'Account  : ' +
         (c.Account != null ? c.Account.Name : 'N/A') +
         '\n' +
-        'Open for : ' +
+        'Hours since opened or last escalated: ' +
         hoursOpen +
-        ' hour(s)\n' +
+        '\n' +
         'New Priority: ' +
         c.Priority +
         '\n\n' +

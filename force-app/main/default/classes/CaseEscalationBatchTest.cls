@@ -36,8 +36,6 @@ private class CaseEscalationBatchTest {
         CreatedDate,
         Last_Escalated_At__c,
         OwnerId,
-        Owner.Email,
-        Owner.Name,
         Account.Name
       FROM Case
       WHERE Id IN :caseIds
@@ -286,10 +284,106 @@ private class CaseEscalationBatchTest {
       Assert.areNotEqual(failing.Id, post.ParentId);
     }
 
-    Assert.areEqual(1, batch.errors.size(), 'One update failure expected');
+    // Only update failures start with 'Case '; email delivery problems in
+    // orgs with deliverability turned off are reported separately.
+    List<String> updateErrors = new List<String>();
+    for (String error : batch.errors) {
+      if (error.startsWith('Case ')) {
+        updateErrors.add(error);
+      }
+    }
+    Assert.areEqual(1, updateErrors.size(), 'One update failure expected');
     Assert.isTrue(
-      batch.errors[0].contains(failingNumber),
-      'Error should name the failed case: ' + batch.errors[0]
+      updateErrors[0].contains(failingNumber),
+      'Error should name the failed case: ' + updateErrors[0]
+    );
+
+    Assert.areEqual(
+      2,
+      CaseEscalationBatch.ownerEmails.size(),
+      'Only successful rows get an owner email'
+    );
+    for (Messaging.SingleEmailMessage email : CaseEscalationBatch.ownerEmails) {
+      Assert.isFalse(
+        email.getSubject().contains(failingNumber),
+        'The failed case must not be emailed'
+      );
+    }
+  }
+
+  @IsTest
+  static void testOwnerEmailTargetsUserAndHandlesNullSubject() {
+    useTestRules();
+    Case c = new Case(Priority = 'Medium', Status = 'New', Origin = 'Email');
+    insert c;
+    Test.setCreatedDate(c.Id, DateTime.now().addHours(-50));
+    List<Case> scope = queryForBatch(new Set<Id>{ c.Id });
+
+    Test.startTest();
+    new CaseEscalationBatch().execute(null, scope);
+    Test.stopTest();
+
+    Assert.areEqual(
+      1,
+      CaseEscalationBatch.ownerEmails.size(),
+      'One email for the user-owned case'
+    );
+    Messaging.SingleEmailMessage email = CaseEscalationBatch.ownerEmails[0];
+    Assert.areEqual(
+      scope[0].OwnerId,
+      email.getTargetObjectId(),
+      'Email must target the owner User Id'
+    );
+    Assert.isFalse(
+      email.getSaveAsActivity(),
+      'User-targeted email must not be saved as activity'
+    );
+    Assert.isTrue(
+      email.getSubject().contains(scope[0].CaseNumber),
+      'Subject should name the case'
+    );
+    Assert.isTrue(
+      email.getPlainTextBody().contains(CaseEscalationBatch.NO_SUBJECT),
+      'Blank Subject should fall back to placeholder text'
+    );
+  }
+
+  @IsTest
+  static void testQueueOwnedCaseGetsChatterPostButNoEmail() {
+    useTestRules();
+    Group queue = new Group(Name = 'Escalation Test Queue', Type = 'Queue');
+    // Setup objects in their own context to avoid MIXED_DML_OPERATION.
+    System.runAs(new User(Id = UserInfo.getUserId())) {
+      insert queue;
+      insert new QueueSobject(QueueId = queue.Id, SobjectType = 'Case');
+    }
+    Case c = new Case(
+      Subject = 'Queue owned',
+      Priority = 'Medium',
+      Status = 'New',
+      Origin = 'Email',
+      OwnerId = queue.Id
+    );
+    insert c;
+    Test.setCreatedDate(c.Id, DateTime.now().addHours(-50));
+
+    Test.startTest();
+    new CaseEscalationBatch().execute(null, queryForBatch(new Set<Id>{ c.Id }));
+    Test.stopTest();
+
+    Assert.areEqual('High', priorityOf(c.Id), 'Queue-owned case escalates');
+    Assert.areEqual(
+      1,
+      [
+        SELECT COUNT()
+        FROM FeedItem
+        WHERE ParentId = :c.Id AND Type = 'TextPost'
+      ],
+      'Queue-owned case still gets the Chatter post'
+    );
+    Assert.isTrue(
+      CaseEscalationBatch.ownerEmails.isEmpty(),
+      'Queues are not emailed'
     );
   }
 
