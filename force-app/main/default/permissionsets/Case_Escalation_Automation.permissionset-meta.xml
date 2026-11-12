@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <classAccesses>
+        <apexClass>CaseEscalationBatch</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <classAccesses>
+        <apexClass>CaseEscalationScheduler</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <description
+  >For the admin who schedules or runs the Case escalation batch: access to its Apex classes and read access to Case.Last_Escalated_At__c (the field is written by the batch only).</description>
+    <fieldPermissions>
+        <editable>false</editable>
+        <field>Case.Last_Escalated_At__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <hasActivationRequired>false</hasActivationRequired>
+    <label>Case Escalation Automation</label>
+</PermissionSet>
