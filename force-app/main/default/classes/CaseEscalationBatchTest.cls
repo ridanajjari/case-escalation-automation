@@ -388,13 +388,21 @@ private class CaseEscalationBatchTest {
   }
 
   @IsTest
-  static void testSchedulerExecutes() {
-    Test.startTest();
-    CaseEscalationScheduler scheduler = new CaseEscalationScheduler();
+  static void testSchedulerIsScheduledHourly() {
+    String jobName = 'Test Case Escalation';
     String cronExp = '0 0 * * * ?';
-    System.schedule('Test Case Escalation', cronExp, scheduler);
+
+    Test.startTest();
+    Id jobId = System.schedule(jobName, cronExp, new CaseEscalationScheduler());
     Test.stopTest();
-    // No assertion needed — just verifying no exception is thrown
+
+    CronTrigger scheduled = [
+      SELECT CronExpression, CronJobDetail.Name, State
+      FROM CronTrigger
+      WHERE Id = :jobId
+    ];
+    Assert.areEqual(cronExp, scheduled.CronExpression, 'Hourly cron expected');
+    Assert.areEqual(jobName, scheduled.CronJobDetail.Name, 'Job name mismatch');
   }
 
   @IsTest
