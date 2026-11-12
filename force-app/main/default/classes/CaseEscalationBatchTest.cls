@@ -24,7 +24,9 @@ private class CaseEscalationBatchTest {
   }
 
   // Re-reads cases with the fields the batch query selects, so tests can
-  // call execute() directly on a known scope.
+  // call execute() directly on a known scope. Test data access to
+  // Last_Escalated_At__c uses SYSTEM_MODE, like the batch itself, so the
+  // tests do not depend on the running user's field-level security.
   private static List<Case> queryForBatch(Set<Id> caseIds) {
     return [
       SELECT
@@ -39,6 +41,7 @@ private class CaseEscalationBatchTest {
         Account.Name
       FROM Case
       WHERE Id IN :caseIds
+      WITH SYSTEM_MODE
       ORDER BY CaseNumber
     ];
   }
@@ -60,6 +63,7 @@ private class CaseEscalationBatchTest {
       SELECT Priority, Last_Escalated_At__c
       FROM Case
       WHERE Id = :c.Id
+      WITH SYSTEM_MODE
     ];
     Assert.areEqual(
       'High',
@@ -150,7 +154,7 @@ private class CaseEscalationBatchTest {
     // Medium threshold is measured from the escalation, not from creation.
     Case c = createCase('Medium', 100);
     c.Last_Escalated_At__c = DateTime.now().addHours(-2);
-    update c;
+    Database.update(c, AccessLevel.SYSTEM_MODE);
 
     Test.startTest();
     Database.executeBatch(new CaseEscalationBatch(), 200);
@@ -189,7 +193,7 @@ private class CaseEscalationBatchTest {
     useTestRules();
     Case c = createCase('Medium', 200);
     c.Last_Escalated_At__c = DateTime.now().addHours(-50);
-    update c;
+    Database.update(c, AccessLevel.SYSTEM_MODE);
 
     Test.startTest();
     Database.executeBatch(new CaseEscalationBatch(), 200);
