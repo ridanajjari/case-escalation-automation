@@ -229,6 +229,71 @@ private class CaseEscalationBatchTest {
   }
 
   @IsTest
+  static void testChatterPostCreatedOnEscalation() {
+    useTestRules();
+    Case escalatedCase = createCase('Medium', 50);
+    Case untouchedCase = createCase('Medium', 10);
+
+    Test.startTest();
+    Database.executeBatch(new CaseEscalationBatch(), 200);
+    Test.stopTest();
+
+    List<FeedItem> posts = [
+      SELECT ParentId, Body
+      FROM FeedItem
+      WHERE
+        ParentId IN :new Set<Id>{ escalatedCase.Id, untouchedCase.Id }
+        AND Type = 'TextPost'
+    ];
+    Assert.areEqual(1, posts.size(), 'Only the escalated case gets a post');
+    Assert.areEqual(escalatedCase.Id, posts[0].ParentId);
+    Assert.isTrue(
+      posts[0].Body.contains('Priority escalated to High'),
+      'Post should name the new priority: ' + posts[0].Body
+    );
+  }
+
+  @IsTest
+  static void testPartialFailureNotifiesOnlySuccessfulRows() {
+    useTestRules();
+    Case ok1 = createCase('Medium', 50);
+    Case ok2 = createCase('Medium', 50);
+    Case failing = createCase('Medium', 50);
+    Set<Id> allIds = new Set<Id>{ ok1.Id, ok2.Id, failing.Id };
+    List<Case> scope = queryForBatch(allIds);
+    String failingNumber = [SELECT CaseNumber FROM Case WHERE Id = :failing.Id]
+    .CaseNumber;
+
+    // Deleting a row after it was queried makes its update fail
+    // (ENTITY_IS_DELETED) while the other rows in the scope succeed.
+    delete failing;
+
+    CaseEscalationBatch batch = new CaseEscalationBatch();
+    Test.startTest();
+    batch.execute(null, scope);
+    Test.stopTest();
+
+    Assert.areEqual('High', priorityOf(ok1.Id), 'ok1 should be escalated');
+    Assert.areEqual('High', priorityOf(ok2.Id), 'ok2 should be escalated');
+
+    List<FeedItem> posts = [
+      SELECT ParentId
+      FROM FeedItem
+      WHERE ParentId IN :allIds AND Type = 'TextPost'
+    ];
+    Assert.areEqual(2, posts.size(), 'Only successful rows get a post');
+    for (FeedItem post : posts) {
+      Assert.areNotEqual(failing.Id, post.ParentId);
+    }
+
+    Assert.areEqual(1, batch.errors.size(), 'One update failure expected');
+    Assert.isTrue(
+      batch.errors[0].contains(failingNumber),
+      'Error should name the failed case: ' + batch.errors[0]
+    );
+  }
+
+  @IsTest
   static void testSchedulerExecutes() {
     Test.startTest();
     CaseEscalationScheduler scheduler = new CaseEscalationScheduler();

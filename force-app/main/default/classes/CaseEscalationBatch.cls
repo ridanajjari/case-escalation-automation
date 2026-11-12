@@ -121,8 +121,7 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
 
   public void execute(Database.BatchableContext bc, List<Case> cases) {
     List<Case> toUpdate = new List<Case>();
-    List<Messaging.SingleEmailMessage> emails = new List<Messaging.SingleEmailMessage>();
-    List<FeedItem> posts = new List<FeedItem>();
+    Map<Id, Long> hoursByCaseId = new Map<Id, Long>();
 
     DateTime now = DateTime.now();
     for (Case c : cases) {
@@ -135,36 +134,65 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
       c.Priority = newPriority;
       c.Last_Escalated_At__c = now;
       toUpdate.add(c);
+      hoursByCaseId.put(c.Id, hoursOpen);
+    }
 
-      posts.add(buildChatterPost(c, hoursOpen));
+    if (toUpdate.isEmpty()) {
+      return;
+    }
 
+    List<Case> escalated = new List<Case>();
+    List<Database.SaveResult> results = Database.update(toUpdate, false);
+    for (Integer i = 0; i < results.size(); i++) {
+      if (results[i].isSuccess()) {
+        escalatedCount++;
+        escalated.add(toUpdate[i]);
+      } else {
+        errors.add(
+          'Case ' +
+            toUpdate[i].CaseNumber +
+            ': ' +
+            results[i].getErrors()[0].getMessage()
+        );
+      }
+    }
+
+    // Notifications are built only for rows whose update succeeded, so a
+    // failed escalation never produces a Chatter post or an email.
+    postToChatter(escalated, hoursByCaseId);
+
+    List<Messaging.SingleEmailMessage> emails = new List<Messaging.SingleEmailMessage>();
+    for (Case c : escalated) {
       if (String.isNotBlank(c.Owner.Email)) {
-        emails.add(buildEmail(c, hoursOpen));
+        emails.add(buildEmail(c, hoursByCaseId.get(c.Id)));
       }
     }
-
-    if (!toUpdate.isEmpty()) {
-      List<Database.SaveResult> results = Database.update(toUpdate, false);
-      for (Integer i = 0; i < results.size(); i++) {
-        if (results[i].isSuccess()) {
-          escalatedCount++;
-        } else {
-          errors.add(
-            'Case ' +
-              toUpdate[i].CaseNumber +
-              ': ' +
-              results[i].getErrors()[0].getMessage()
-          );
-        }
-      }
-    }
-
-    if (!posts.isEmpty()) {
-      insert posts;
-    }
-
     if (!emails.isEmpty()) {
       Messaging.sendEmail(emails, false);
+    }
+  }
+
+  private void postToChatter(
+    List<Case> escalated,
+    Map<Id, Long> hoursByCaseId
+  ) {
+    List<FeedItem> posts = new List<FeedItem>();
+    for (Case c : escalated) {
+      posts.add(buildChatterPost(c, hoursByCaseId.get(c.Id)));
+    }
+    if (posts.isEmpty()) {
+      return;
+    }
+    List<Database.SaveResult> results = Database.insert(posts, false);
+    for (Integer i = 0; i < results.size(); i++) {
+      if (!results[i].isSuccess()) {
+        errors.add(
+          'Chatter post failed for Case ' +
+            escalated[i].CaseNumber +
+            ': ' +
+            results[i].getErrors()[0].getMessage()
+        );
+      }
     }
   }
 
