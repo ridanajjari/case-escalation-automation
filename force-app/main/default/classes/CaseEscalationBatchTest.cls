@@ -142,4 +142,91 @@ private class CaseEscalationBatchTest {
       );
     }
   }
+
+  // Re-reads a case with the fields the batch query selects, so tests can
+  // call execute() directly on a known scope.
+  private static List<Case> queryForBatch(Id caseId) {
+    return [
+      SELECT
+        Id,
+        CaseNumber,
+        Subject,
+        Priority,
+        Status,
+        CreatedDate,
+        Last_Escalated_At__c,
+        OwnerId,
+        Owner.Email,
+        Owner.Name,
+        Account.Name
+      FROM Case
+      WHERE Id = :caseId
+    ];
+  }
+
+  @IsTest
+  static void testRecentlyEscalatedCaseIsNotEscalatedAgain() {
+    // Created long ago, but escalated to High only 2 hours ago: the 24h
+    // High threshold is measured from the escalation, not from creation.
+    Case c = createCase('High', 100);
+    c.Last_Escalated_At__c = DateTime.now().addHours(-2);
+    update c;
+
+    Test.startTest();
+    Database.executeBatch(new CaseEscalationBatch(), 200);
+    Test.stopTest();
+
+    Case updated = [SELECT Priority FROM Case WHERE Id = :c.Id];
+    Assert.areEqual(
+      'High',
+      updated.Priority,
+      'A case escalated 2h ago must not be escalated again'
+    );
+  }
+
+  @IsTest
+  static void testNoDoubleEscalationAcrossConsecutiveRuns() {
+    Case c = createCase('Medium', 50);
+    CaseEscalationBatch batch = new CaseEscalationBatch();
+
+    Test.startTest();
+    batch.execute(null, queryForBatch(c.Id));
+    Case afterFirstRun = queryForBatch(c.Id)[0];
+    // Simulates the next hourly run on the same record.
+    batch.execute(null, new List<Case>{ afterFirstRun });
+    Test.stopTest();
+
+    Case updated = [
+      SELECT Priority, Last_Escalated_At__c
+      FROM Case
+      WHERE Id = :c.Id
+    ];
+    Assert.areEqual(
+      'High',
+      updated.Priority,
+      'Second run must not escalate High to the next level immediately'
+    );
+    Assert.isNotNull(
+      updated.Last_Escalated_At__c,
+      'Escalation must stamp Last_Escalated_At__c'
+    );
+  }
+
+  @IsTest
+  static void testEscalatesAgainOnceThresholdPassedSinceLastEscalation() {
+    Case c = createCase('Medium', 200);
+    c.Last_Escalated_At__c = DateTime.now().addHours(-50);
+    update c;
+
+    Test.startTest();
+    Database.executeBatch(new CaseEscalationBatch(), 200);
+    Test.stopTest();
+
+    Case updated = [SELECT Priority FROM Case WHERE Id = :c.Id];
+    Assert.areEqual(
+      'High',
+      updated.Priority,
+      'Age since last escalation (50h) exceeds the 48h Medium threshold'
+    );
+  }
 }

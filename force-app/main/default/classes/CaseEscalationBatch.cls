@@ -1,12 +1,17 @@
 /**
  * Batch job that escalates open Cases that have breached their SLA thresholds.
  *
- * SLA Rules:
- *   - Medium priority open for > 48 hours  → escalated to High
- *   - High priority open for   > 24 hours  → escalated to Critical
+ * SLA Rules (age = hours since Last_Escalated_At__c, or since CreatedDate
+ * if the case has never been escalated):
+ *   - Medium priority, age >= 48 hours → escalated to High
+ *   - High priority,   age >= 24 hours → escalated to Critical
+ *
+ * Measuring from the last escalation means a Medium case escalated to High
+ * gets a fresh 24 hours at High instead of jumping straight to Critical on
+ * the next run.
  *
  * On escalation:
- *   - Priority is updated
+ *   - Priority is updated and Last_Escalated_At__c is stamped
  *   - A chatter post is added to the Case
  *   - An email alert is sent to the Case Owner
  *
@@ -23,6 +28,10 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
   private List<String> errors = new List<String>();
 
   public Database.QueryLocator start(Database.BatchableContext bc) {
+    // Coarse SOQL pre-filter on the smallest threshold (24h); the exact
+    // per-priority threshold is applied in execute(). SOQL cannot express
+    // COALESCE(Last_Escalated_At__c, CreatedDate), hence the OR.
+    DateTime cutoff = DateTime.now().addHours(-24);
     return Database.getQueryLocator(
       [
         SELECT
@@ -32,6 +41,7 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
           Priority,
           Status,
           CreatedDate,
+          Last_Escalated_At__c,
           OwnerId,
           Owner.Email,
           Owner.Name,
@@ -40,7 +50,9 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
         WHERE
           IsClosed = FALSE
           AND Priority IN ('Medium', 'High')
-          AND CreatedDate < :DateTime.now().addHours(-24)
+          AND (Last_Escalated_At__c < :cutoff
+          OR (Last_Escalated_At__c = NULL
+          AND CreatedDate < :cutoff))
       ]
     );
   }
@@ -50,15 +62,16 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
     List<Messaging.SingleEmailMessage> emails = new List<Messaging.SingleEmailMessage>();
     List<FeedItem> posts = new List<FeedItem>();
 
+    DateTime now = DateTime.now();
     for (Case c : cases) {
-      Long hoursOpen =
-        (DateTime.now().getTime() - c.CreatedDate.getTime()) / 3600000;
+      Long hoursOpen = hoursSinceLastEscalation(c, now);
       String newPriority = getEscalatedPriority(c.Priority, hoursOpen);
 
       if (newPriority == null)
         continue;
 
       c.Priority = newPriority;
+      c.Last_Escalated_At__c = now;
       toUpdate.add(c);
 
       posts.add(buildChatterPost(c, hoursOpen));
@@ -119,6 +132,16 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
     );
   }
 
+  // Whole hours since the case was last escalated, or since it was created
+  // if it has never been escalated.
+  @TestVisible
+  private static Long hoursSinceLastEscalation(Case c, DateTime now) {
+    DateTime reference = c.Last_Escalated_At__c != null
+      ? c.Last_Escalated_At__c
+      : c.CreatedDate;
+    return (now.getTime() - reference.getTime()) / 3600000;
+  }
+
   // Returns the new priority if SLA is breached, null if no escalation needed
   private String getEscalatedPriority(String currentPriority, Long hoursOpen) {
     if (currentPriority == 'Medium' && hoursOpen >= 48)
@@ -132,9 +155,9 @@ public without sharing class CaseEscalationBatch implements Database.Batchable<S
     FeedItem post = new FeedItem();
     post.ParentId = c.Id;
     post.Body =
-      'SLA BREACH — This case has been open for ' +
+      'SLA BREACH — ' +
       hoursOpen +
-      ' hour(s). Priority escalated to ' +
+      ' hour(s) since this case was opened or last escalated. Priority escalated to ' +
       c.Priority +
       '. Immediate attention required.';
     return post;
