@@ -80,6 +80,7 @@ Without it, the batch skips the `High_To_Critical` rule and reports it in the ru
 ## Design Notes and Known Limits
 
 - **Sharing**: `CaseEscalationBatch` is `without sharing` on purpose. An org-wide SLA job must see every open case, whoever scheduled it. `CaseEscalationScheduler` is `with sharing`: it only enqueues the batch.
+- **System mode**: the batch query and its Case/FeedItem DML run with `AccessLevel.SYSTEM_MODE`, so the job does not depend on the scheduling user's field-level security on `Last_Escalated_At__c`. The permission set gives admins read access to the field.
 - **Query selectivity**: SOQL cannot express `COALESCE(Last_Escalated_At__c, CreatedDate)`, so `start()` pre-filters with:
   - `IsClosed = false`
   - `Priority IN (active From priorities)`
@@ -203,9 +204,15 @@ The tests inject their own rules through a `@TestVisible` override and use only 
 
 Status as of 2026-11-12:
 
-- ✅ Apex tests written: 15 test methods (see the table above).
-- ✅ Offline checks passing: Apex parses (prettier-plugin-apex via `npm run prettier:verify`), ESLint (`npm run lint`), and all `*-meta.xml` files are well-formed XML.
-- ⏳ Apex test execution and coverage: still to be run in a Developer Edition org. No coverage figure is claimed here until then.
+- ✅ Deployed to a Developer Edition org at API 68.0 (2026-11-12): all classes, the `Last_Escalated_At__c` field, the Custom Metadata Type with its 2 records, and the permission set.
+- ✅ 15/15 Apex tests passing (`CaseEscalationBatchTest`). Coverage as reported by `sf apex run test --code-coverage`:
+  - `CaseEscalationBatch`: 88%
+  - `CaseEscalationScheduler`: 100%
+
+  The uncovered lines are the duplicate-rule and invalid-threshold branches of rule loading, plus email-failure handling.
+
+- ✅ Offline checks passing: `npm run prettier:verify` (also parses the Apex), `npm run lint`, and all `*-meta.xml` files are well-formed XML.
+- Not exercised end to end: the shipped `High_To_Critical` rule. The test org has no `Critical` priority, and the tests use injected rules with standard priorities only.
 
 ---
 
